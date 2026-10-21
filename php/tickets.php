@@ -1,10 +1,9 @@
 <?php
-session_start();
+require_once __DIR__ . '/auth.php';
+require_login(['admin', 'server']);
 require_once('db_connection.php');
 $appSettings = $pdo->query('SELECT setting_key, setting_value FROM app_settings')->fetchAll(PDO::FETCH_KEY_PAIR);
 $currencySymbol = $appSettings['currency_symbol'] ?? 'DH';
-$invoiceHeader = $appSettings['invoice_header'] ?? 'Facture de Vente';
-$invoiceFooter = $appSettings['invoice_footer'] ?? 'Merci pour votre visite !';
 
 $ticketNumber = trim($_GET['ticket'] ?? '');
 $ticketDate = trim($_GET['date'] ?? '');
@@ -20,10 +19,11 @@ if ($ticketDate !== '') {
     $params[':ticket_date'] = $ticketDate;
 }
 
-$sql = "SELECT s.id, s.date, s.total_amount, COALESCE(pay.method, s.payment_type) AS payment_method,
+$sql = "SELECT s.id, s.date, s.total_amount, u.username AS server_name, COALESCE(pay.method, s.payment_type) AS payment_method,
                COALESCE(c.name, 'Client libre') AS client_name,
-               GROUP_CONCAT(CONCAT(p.name, ' x', si.quantity) ORDER BY si.id SEPARATOR '\n') AS details
+               GROUP_CONCAT(CONCAT(COALESCE(si.product_name, p.name, 'Produit'), ' x', si.quantity, ' — ', FORMAT(si.unit_price, 2), ' ', COALESCE((SELECT setting_value FROM app_settings WHERE setting_key = 'currency_symbol'), 'DH')) ORDER BY si.id SEPARATOR '\n') AS details
         FROM sales s
+        LEFT JOIN users u ON u.id = s.user_id
         LEFT JOIN clients c ON c.id = s.client_id
         LEFT JOIN payments pay ON pay.sale_id = s.id
         LEFT JOIN sale_items si ON si.sale_id = s.id
@@ -31,7 +31,11 @@ $sql = "SELECT s.id, s.date, s.total_amount, COALESCE(pay.method, s.payment_type
 if ($where) {
     $sql .= ' WHERE ' . implode(' AND ', $where);
 }
-$sql .= ' GROUP BY s.id, s.date, s.total_amount, pay.method, s.payment_type, c.name ORDER BY s.date DESC';
+if (!is_admin()) {
+    $sql .= ($where ? ' AND' : ' WHERE') . ' s.user_id = :user_id';
+    $params[':user_id'] = (int)$_SESSION['user_id'];
+}
+$sql .= ' GROUP BY s.id, s.date, s.total_amount, u.username, pay.method, s.payment_type, c.name ORDER BY s.date DESC';
 $stmt = $pdo->prepare($sql);
 $stmt->execute($params);
 $tickets = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -50,7 +54,7 @@ $methodLabels = ['cash' => 'Espèces', 'card' => 'Carte', 'transfer' => 'Viremen
 </head>
 <body>
   <header class="header">
-    <div class="header-left"><span><i class="fas fa-user"></i> User : <?=strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN'))?></span></div>
+    <div class="header-left"><span><i class="fas fa-user"></i> <?=is_admin() ? 'Administrateur' : 'Serveur'?> : <?=strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN'))?></span></div>
     <div class="header-center"><span id="current-time"></span></div>
     <div class="header-right"><button class="close-btn" onclick="location.href='menu.php'">✕</button></div>
   </header>
@@ -77,45 +81,30 @@ $methodLabels = ['cash' => 'Espèces', 'card' => 'Carte', 'transfer' => 'Viremen
       <h5><i class="fas fa-history"></i> Historique des Tickets</h5>
       <div class="table-responsive">
         <table class="table table-bordered align-middle text-center">
-          <thead><tr><th>#</th><th>Numéro Ticket</th><th>Date</th><th>Montant Total</th><th>Méthode de Paiement</th><th>Client</th><th>Actions</th></tr></thead>
+          <thead><tr><th>#</th><th>Date</th><?php if (is_admin()): ?><th>Serveur</th><?php endif; ?><th>Montant Total</th><th>Méthode de Paiement</th><th>Client</th><th>Actions</th></tr></thead>
           <tbody>
             <?php foreach ($tickets as $index => $ticket): $method = $methodLabels[$ticket['payment_method']] ?? $ticket['payment_method']; ?>
             <tr>
               <td><?=$index + 1?></td>
-              <td><strong>TCK-<?=str_pad($ticket['id'], 4, '0', STR_PAD_LEFT)?></strong></td>
               <td><?=htmlspecialchars(date('Y-m-d H:i', strtotime($ticket['date'])))?></td>
+              <?php if (is_admin()): ?><td><?=htmlspecialchars($ticket['server_name'] ?? 'Non attribué')?></td><?php endif; ?>
               <td class="amount-cell"><?=number_format($ticket['total_amount'], 2, '.', ' ')?> <?=htmlspecialchars($currencySymbol)?></td>
               <td><span class="payment-badge"><?=htmlspecialchars($method)?></span></td>
               <td><?=htmlspecialchars($ticket['client_name'])?></td>
               <td>
-                <button type="button" class="btn btn-sm btn-success btn-view-ticket" data-details="<?=htmlspecialchars($ticket['details'] ?? '')?>"><i class="fas fa-eye"></i> Voir</button>
-                <button type="button" class="btn btn-sm btn-primary btn-print-ticket"><i class="fas fa-print"></i> Imprimer</button>
+                <a class="btn btn-sm btn-success" href="ticket.php?id=<?=(int)$ticket['id']?>" target="_blank" rel="noopener"><i class="fas fa-eye"></i> Voir</a>
+                <a class="btn btn-sm btn-primary" href="ticket.php?id=<?=(int)$ticket['id']?>&amp;print=1" target="_blank" rel="noopener"><i class="fas fa-print"></i> Imprimer</a>
               </td>
             </tr>
             <?php endforeach; ?>
-            <?php if (!$tickets): ?><tr><td colspan="7">Aucun ticket trouvé.</td></tr><?php endif; ?>
+            <?php if (!$tickets): ?><tr><td colspan="<?=is_admin() ? 7 : 6?>">Aucun ticket trouvé.</td></tr><?php endif; ?>
           </tbody>
         </table>
       </div>
     </div>
   </div>
 
+  <?php render_app_date_script($pdo); ?>
   <script src="../js/global-time.js"></script>
-  <script>
-    const invoiceHeader = <?=json_encode($invoiceHeader, JSON_UNESCAPED_UNICODE)?>;
-    const invoiceFooter = <?=json_encode($invoiceFooter, JSON_UNESCAPED_UNICODE)?>;
-    document.querySelectorAll('.btn-view-ticket').forEach(button => {
-      button.addEventListener('click', () => alert(button.dataset.details || 'Aucun article.'));
-    });
-    document.querySelectorAll('.btn-print-ticket').forEach(button => {
-      button.addEventListener('click', () => {
-        const row = button.closest('tr');
-        const popup = window.open('', '_blank', 'width=700,height=500');
-        popup.document.write(`<html><head><title>${row.children[1].textContent}</title></head><body><h2>${invoiceHeader}</h2><table border="1">${row.outerHTML}</table><p>${invoiceFooter}</p></body></html>`);
-        popup.document.close();
-        popup.print();
-      });
-    });
-  </script>
 </body>
 </html>

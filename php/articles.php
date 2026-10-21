@@ -1,107 +1,98 @@
 <?php 
-session_start(); 
+require_once __DIR__ . '/auth.php';
+require_login(['admin']);
 require_once('db_connection.php');
 
-if(isset($_POST['add'])){
-    if((isset($_POST['name']) &&
-        (isset($_FILES['image']) && $_FILES['image']['error'] == 0) &&
-        isset($_POST['selling-price']) &&
-        isset($_POST['purchase-price']) &&
-        isset($_POST['stock-quantity']) &&
-        isset($_POST['barcode']) &&
-        isset($_POST['product-brand']) 
-    )
-      ){
-        $name = strip_tags($_POST['name']);
-        $selling_price = strip_tags($_POST['selling-price']);
-        $purchase_price = strip_tags($_POST['purchase-price']);
-        $stock_quantity = strip_tags($_POST['stock-quantity']);
-        $barcode = strip_tags($_POST['barcode']);
-        $brand = strip_tags($_POST['product-brand']);
-
-        $ext = pathinfo($_FILES['image']['name'],PATHINFO_EXTENSION);
-        $image_name = str_replace(' ','_',$name).".".$ext;
-        $image_path = "../imgs/products-img/".$image_name;
-
-        if(move_uploaded_file($_FILES['image']['tmp_name'],$image_path)){
-            $sql = "INSERT INTO products (name,image,selling_price,purchase_price,stock_quantity,barcode,brand_id) 
-                    VALUES (:name,:image,:sellingPrice,:purchasePrice,:stockQuantity,:barcode,:brand)";
-            $req = $pdo->prepare($sql);
-            $req->bindValue(':name',$name,PDO::PARAM_STR);
-            $req->bindValue(':image',$image_path,PDO::PARAM_STR);
-            $req->bindValue(':sellingPrice',$selling_price,PDO::PARAM_INT);
-            $req->bindValue(':purchasePrice',$purchase_price,PDO::PARAM_INT);
-            $req->bindValue(':stockQuantity',$stock_quantity,PDO::PARAM_INT);
-            $req->bindValue(':barcode',$barcode,PDO::PARAM_STR);
-            $req->bindValue(':brand',$brand,PDO::PARAM_INT);
-            $req->execute();
-            echo "<script>alert('✅ la article ajoutée avec succès !');document.location='articles.php';</script>";
-            exit();
-        }else{
-            echo "<script>alert('❌ Échec du téléchargement de l\'image.');document.location='articles.php';</script>";
-            exit();
-        }
-    }else{
-        echo "<script>alert('⚠️ Veuillez entrer un nom de la article et choisir une image.');document.location='articles.php';</script>";
-        exit();
-    }
-}
-
-if(isset($_POST['update'])){
-    if(isset($_POST['name'], $_POST['selling-price'], $_POST['purchase-price'], $_POST['stock-quantity'], $_POST['barcode'], $_POST['product-brand'])){
-        $id = (int)$_POST['id'];
-        $name = strip_tags($_POST['name']);
-        $selling_price = strip_tags($_POST['selling-price']);
-        $purchase_price = strip_tags($_POST['purchase-price']);
-        $stock_quantity = strip_tags($_POST['stock-quantity']);
-        $barcode = strip_tags($_POST['barcode']);
-        $brand = strip_tags($_POST['product-brand']);
-
-        $sql = "SELECT image FROM products WHERE id=:id";
-        $req = $pdo->prepare($sql);
-        $req->bindValue(':id',$id,PDO::PARAM_INT);
-        $req->execute();
-        $product = $req->fetch(PDO::FETCH_ASSOC);
-
-        if($product){
-            $image_path = $product['image'];
-
-            if(isset($_FILES['image']) && $_FILES['image']['error'] === 0){
-                $ext = pathinfo($_FILES['image']['name'],PATHINFO_EXTENSION);
-                $image_name = str_replace(' ','_',$name).".".$ext;
-                $image_path = "../imgs/products-img/".$image_name;
-                move_uploaded_file($_FILES['image']['tmp_name'],$image_path);
-            }
-
-            $sql2 = "UPDATE products SET name=:name,image=:image,selling_price=:sellingPrice,purchase_price=:purchasePrice,stock_quantity=:stockQuantity,barcode=:barcode,brand_id=:brand WHERE id=:id";
-            $req2 = $pdo->prepare($sql2);
-            $req2->bindValue(':id',$id,PDO::PARAM_INT);
-            $req2->bindValue(':name',$name,PDO::PARAM_STR);
-            $req2->bindValue(':image',$image_path,PDO::PARAM_STR);
-            $req2->bindValue(':sellingPrice',$selling_price,PDO::PARAM_INT);
-            $req2->bindValue(':purchasePrice',$purchase_price,PDO::PARAM_INT);
-            $req2->bindValue(':stockQuantity',$stock_quantity,PDO::PARAM_INT);
-            $req2->bindValue(':barcode',$barcode,PDO::PARAM_STR);
-            $req2->bindValue(':brand',$brand,PDO::PARAM_INT);
-            $req2->execute();
-        }
-
-        header('location:articles.php');
-        exit();
-    }
-}
-
-if(isset($_POST['delete'])){
-    $id = (int)$_POST['id'];
-    $sql = 'DELETE FROM products WHERE id=:id';
-    $req = $pdo->prepare($sql);
-    $req->bindValue(':id',$id,PDO::PARAM_INT);
-    $req->execute();
-    header('Location:articles.php');
+function redirectWithMessage(string $message): void {
+    $_SESSION['product_message'] = $message;
+    header('Location: articles.php');
     exit();
 }
 
+function saveProductImage(?string $currentImage): ?string {
+    if (!isset($_FILES['image']) || $_FILES['image']['error'] === UPLOAD_ERR_NO_FILE) {
+        return $currentImage;
+    }
+    if ($_FILES['image']['error'] !== UPLOAD_ERR_OK) {
+        throw new RuntimeException('Le téléversement de l’image a échoué.');
+    }
+    $extension = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+    if (!in_array($extension, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+        throw new RuntimeException('Format d’image invalide (JPG, PNG ou WEBP).');
+    }
+    $fileName = bin2hex(random_bytes(12)) . '.' . $extension;
+    $relativePath = '../imgs/products-img/' . $fileName;
+    if (!move_uploaded_file($_FILES['image']['tmp_name'], __DIR__ . '/../imgs/products-img/' . $fileName)) {
+        throw new RuntimeException('Impossible d’enregistrer l’image du produit.');
+    }
+    return $relativePath;
+}
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        if (isset($_POST['add']) || isset($_POST['update'])) {
+            $id = (int)($_POST['id'] ?? 0);
+            $name = trim($_POST['name'] ?? '');
+            $categoryId = (int)($_POST['category'] ?? 0);
+            $price = filter_var($_POST['selling-price'] ?? null, FILTER_VALIDATE_FLOAT);
+            if ($name === '' || $categoryId < 1 || $price === false || $price <= 0) {
+                throw new RuntimeException('Renseignez le nom, la catégorie et un prix supérieur à zéro.');
+            }
+            $categoryStmt = $pdo->prepare('SELECT id FROM categories WHERE id = :id');
+            $categoryStmt->execute([':id' => $categoryId]);
+            if (!$categoryStmt->fetchColumn()) {
+                throw new RuntimeException('La catégorie sélectionnée est introuvable.');
+            }
+
+            $barcode = trim($_POST['barcode'] ?? '');
+            if ($barcode === '') {
+                $barcode = 'CAFE-' . strtoupper(bin2hex(random_bytes(6)));
+            }
+            $currentImage = null;
+            if (isset($_POST['update'])) {
+                $currentStmt = $pdo->prepare('SELECT image FROM products WHERE id = :id');
+                $currentStmt->execute([':id' => $id]);
+                $currentImage = $currentStmt->fetchColumn();
+                if ($currentImage === false) {
+                    throw new RuntimeException('Le produit à modifier est introuvable.');
+                }
+            }
+            $image = saveProductImage($currentImage);
+            if (isset($_POST['add'])) {
+                $stmt = $pdo->prepare('INSERT INTO products (name, image, selling_price, purchase_price, stock_quantity, barcode, brand_id, category_id, is_active) VALUES (:name, :image, :price, 0, 0, :barcode, NULL, :category, 1)');
+            } else {
+                $stmt = $pdo->prepare('UPDATE products SET name = :name, image = :image, selling_price = :price, barcode = :barcode, category_id = :category, is_active = :active WHERE id = :id');
+                $stmt->bindValue(':active', isset($_POST['is_active']) ? 1 : 0, PDO::PARAM_INT);
+                $stmt->bindValue(':id', $id, PDO::PARAM_INT);
+            }
+            $stmt->bindValue(':name', $name, PDO::PARAM_STR);
+            $stmt->bindValue(':image', $image, $image === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+            $stmt->bindValue(':price', $price);
+            $stmt->bindValue(':barcode', $barcode, PDO::PARAM_STR);
+            $stmt->bindValue(':category', $categoryId, PDO::PARAM_INT);
+            $stmt->execute();
+            redirectWithMessage(isset($_POST['add']) ? 'Produit ajouté.' : 'Produit modifié.');
+        }
+
+        if (isset($_POST['delete'])) {
+            $id = (int)($_POST['id'] ?? 0);
+            $stmt = $pdo->prepare('UPDATE products SET is_active = 0 WHERE id = :id');
+            $stmt->execute([':id' => $id]);
+            redirectWithMessage('Produit retiré de la carte. Son historique de ventes est conservé.');
+        }
+    } catch (Throwable $e) {
+        redirectWithMessage('Opération impossible : ' . $e->getMessage());
+    }
+}
+
+$categories = $pdo->query("SELECT c.id, c.name FROM categories c WHERE c.name IN ('Cafés', 'Thés', 'Boissons froides', 'Viennoiseries', 'Repas', 'Sandwichs', 'Desserts') OR EXISTS (SELECT 1 FROM products p WHERE p.category_id = c.id AND p.is_active = 1) ORDER BY c.name")->fetchAll(PDO::FETCH_ASSOC);
+$products = $pdo->query('SELECT p.id, p.name, p.image, p.selling_price, p.barcode, p.category_id, p.is_active, c.name AS category_name FROM products p LEFT JOIN categories c ON c.id = p.category_id ORDER BY p.name')->fetchAll(PDO::FETCH_ASSOC);
+foreach ($products as &$product) {
+    $product['image'] = catalog_product_image($product['name'], $product['image']);
+}
+unset($product);
+$message = $_SESSION['product_message'] ?? '';
+unset($_SESSION['product_message']);
 ?>
 <!DOCTYPE html>
 <html lang="fr" dir="ltr">
@@ -117,7 +108,7 @@ if(isset($_POST['delete'])){
 <body data-edit-id="<?=(int)($_GET['edit'] ?? 0)?>">
     <header class="header">
         <div class="header-left">
-            <span><i class="fas fa-user"></i> User : <?php echo strtoupper($_SESSION['username'] ?? 'ADMIN'); ?></span>
+            <span><i class="fas fa-user"></i> Administrateur : <?php echo strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN')); ?></span>
         </div>
         <div class="header-center">
             <span id="current-time"></span>
@@ -142,6 +133,7 @@ if(isset($_POST['delete'])){
                     <span>Ajouter / Modifier Produit</span>
                 </div>
 
+                <?php if ($message): ?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif; ?>
                 <form method="POST" enctype="multipart/form-data">
                     <input type="hidden" name="id" id="product-id">
                     
@@ -153,106 +145,37 @@ if(isset($_POST['delete'])){
                             type="text" 
                             name="name" 
                             id="product-name" 
-                            placeholder="Ex: Lait Jawda" 
-                            required
-                        >
-                    </div>
-
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="purchase-price">
-                                <i class="fas fa-dollar-sign"></i> Prix d'Achat (DH)
-                            </label>
-                            <input 
-                                type="number" 
-                                name="purchase-price" 
-                                id="purchase-price" 
-                                placeholder="3.50" 
-                                step="0.01"
-                                required
-                            >
-                        </div>
-
-                        <div class="form-group">
-                            <label for="selling-price">
-                                <i class="fas fa-tag"></i> Prix de Vente (DH)
-                            </label>
-                            <input 
-                                type="number" 
-                                name="selling-price" 
-                                id="selling-price" 
-                                placeholder="4.00" 
-                                step="0.01"
-                                required
-                            >
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label for="stock-quantity">
-                            <i class="fas fa-warehouse"></i> Quantité en Stock
-                        </label>
-                        <input 
-                            type="number" 
-                            name="stock-quantity" 
-                            id="stock-quantity" 
-                            placeholder="100" 
+                            placeholder="Ex: Café espresso"
                             required
                         >
                     </div>
 
                     <div class="form-group">
-                        <label for="barcode">
-                            <i class="fas fa-barcode"></i> Code-Barres
-                        </label>
-                        <input 
-                            type="text" 
-                            name="barcode" 
-                            id="barcode" 
-                            placeholder="6260809000012" 
-                            required
-                        >
+                        <label for="selling-price"><i class="fas fa-tag"></i> Prix de vente (DH)</label>
+                        <input type="number" name="selling-price" id="selling-price" min="0.01" step="0.01" placeholder="15.00" required>
                     </div>
-                    
+                    <div class="form-group">
+                        <label for="barcode"><i class="fas fa-barcode"></i> Code (facultatif)</label>
+                        <input type="text" name="barcode" id="barcode" placeholder="Généré automatiquement si vide">
+                    </div>
                     <div class="form-group">
                         <label for="product-category">
                             <i class="fas fa-th-large"></i> Catégorie
                         </label>
                         <select name="category" id="product-category" required>
                             <option value="">Choisir une catégorie...</option>
-                            <?php
-                                $sql = "SELECT * FROM categories" ;
-                                $stmt = $pdo->query($sql);
-                                $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                            ?>
-                            <?php foreach($categories as $category):?>
-                                <option value="<?=$category['id']?>"><?=$category['name']?></option>
+                            <?php foreach ($categories as $category): ?>
+                                <option value="<?=$category['id']?>"><?=htmlspecialchars($category['name'])?></option>
                             <?php endforeach;?>
                         </select>
                     </div>
-
                     <div class="form-group">
-                        <label for="product-brand">
-                            <i class="fas fa-bookmark"></i> Marque
-                        </label>
-                        <select name="product-brand" id="product-brand" required>
-                            <option value="">Choisir une marque...</option>
-                            <?php
-                                $sql = "SELECT * FROM brands" ;
-                                $stmt = $pdo->query($sql);
-                                $brands = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                            ?>
-                            <?php foreach($brands as $brand):?>
-                                <option value="<?=$brand['id']?>"><?=$brand['name']?></option>
-                            <?php endforeach;?>
-                        </select>
+                        <label><input type="checkbox" name="is_active" id="product-active" checked> Produit disponible à la vente</label>
                     </div>
 
-
-                    
                     <div class="form-group">
                         <label for="product-image">
-                            <i class="fas fa-image"></i> Image de l'article
+                            <i class="fas fa-image"></i> Image (facultative)
                         </label>
                         <input 
                         type="file" 
@@ -271,9 +194,10 @@ if(isset($_POST['delete'])){
                         <button type="submit" id="addProduct" name="add" class="btn btn-add">
                             <i class="fas fa-plus"></i> Ajouter
                         </button>
-                        <button type="submit" id="updateProduct" name="update" class="btn btn-update" >
+                        <button type="submit" id="updateProduct" name="update" class="btn btn-update" disabled>
                             <i class="fas fa-edit"></i> Modifier
                         </button>
+                        <button type="button" id="cancelEdit" class="btn btn-secondary" hidden>Annuler</button>
                     </div>
                 </form>
             </div>
@@ -304,73 +228,41 @@ if(isset($_POST['delete'])){
                             <tr>
                                 <th style="width: 5%;">ID</th>
                                 <th style="width: 15%;">Nom</th>
-                                <th style="width: 13%;">Image</th>
-                                <th style="width: 8%;">Prix Achat</th>
-                                <th style="width: 8%;">Prix Vente</th>
-                                <th style="width: 7%;">Stock</th>
-                                <th style="width: 10%;">Code-Barres</th>
-                                <th style="width: 8%;">Marque</th>
-                                <th style="width: 10%;">Catégorie</th>
-                                <th style="width: 14%;">Actions</th>
+                                <th>Catégorie</th>
+                                <th>Prix (DH)</th>
+                                <th>Code</th>
+                                <th>État</th>
+                                <th>Actions</th>
                             </tr>
                         </thead>
 
-                            <?php
-                            $sql2 = "SELECT 
-                                        P.id,
-                                        P.name,
-                                        P.image,
-                                        P.selling_price,
-                                        P.purchase_price,
-                                        P.stock_quantity,
-                                        P.barcode,
-                                        P.brand_id,
-                                        B.category_id,
-                                        B.image AS brand_image,
-                                        B.name AS brand_name,
-                                        C.name AS category_name
-                                    FROM products P
-                                    JOIN brands B ON B.id = P.brand_id
-                                    JOIN categories C ON C.id = B.category_id
-                                    ";
-                                $stmt = $pdo->query($sql2);
-                                $products = $stmt->fetchAll(PDO::FETCH_ASSOC);
-                            ?>
                         <tbody id="products-tbody">
-                            <?php foreach($products as $product):?>
+                            <?php foreach ($products as $product):?>
                                 <tr class="product">
                                     <td><?=$product['id']?></td>
-                                    <td><?=$product['name']?></td>
-                                    <td>
-                                        <img src="<?=$product['image']?>" alt="<?=$product['name']?>" style="width:140px;" class="product-image" >
-                                    </td>
-                                    <td class="price-cell"><?=$product['purchase_price']?></td>
-                                    <td class="price-cell"><?=$product['selling_price']?></td>
-                                    <td><span class="stock-badge stock-high"><?=$product['stock_quantity']?></span></td>
-                                    <td><?=$product['barcode']?></td>
-                                    <td>
-                                        <img src="<?=$product['brand_image']?>" alt="<?=$product['brand_name']?>" style="width:140px;" class="brand-image" >                                    
-                                    </td>
-                                    <td><span class="badge-category"><?=$product['category_name']?></span></td>
+                                    <td><?=htmlspecialchars($product['name'])?></td>
+                                    <td><?=htmlspecialchars($product['category_name'] ?? 'Sans catégorie')?></td>
+                                    <td class="price-cell"><?=number_format((float)$product['selling_price'], 2, '.', ' ')?></td>
+                                    <td><?=htmlspecialchars($product['barcode'])?></td>
+                                    <td><?=$product['is_active'] ? 'Actif' : 'Archivé'?></td>
                                     <td>
                                         <button class="action-btn btn-edit" 
                                                 data-id="<?=$product['id']?>"
-                                                data-name="<?=$product['name']?>"
-                                                data-image="<?=$product['image']?>"
-                                                data-purPrice="<?=$product['purchase_price']?>"
-                                                data-sellPrice="<?=$product['selling_price']?>"
-                                                data-stock="<?=$product['stock_quantity']?>"
-                                                data-barcode="<?=$product['barcode']?>"
-                                                data-brand="<?=$product['brand_id']?>"
+                                                data-name="<?=htmlspecialchars($product['name'], ENT_QUOTES)?>"
+                                                data-image="<?=htmlspecialchars($product['image'] ?? '', ENT_QUOTES)?>"
+                                                data-sell-price="<?=$product['selling_price']?>"
+                                                data-barcode="<?=htmlspecialchars($product['barcode'], ENT_QUOTES)?>"
                                                 data-category="<?=$product['category_id']?>"
+                                                data-active="<?=$product['is_active']?>"
                                                 >
                                             <i class="fas fa-edit"></i> Modifier
                                         </button>
                                         <form method="post" style="display:inline;">
                                             <input type="hidden" name="id" value="<?=$product['id']?>">
-                                            <button name="delete" class="action-btn btn-delete" onclick="return confirm('Voulez-vous vraiment supprimer cet article ?');">
-                                                <i class="fas fa-trash"></i> Supprimer
+                                            <?php if ($product['is_active']): ?><button name="delete" class="action-btn btn-delete" onclick="return confirm('Retirer ce produit de la carte ? L’historique sera conservé.');">
+                                                <i class="fas fa-eye-slash"></i> Retirer
                                             </button>
+                                            <?php endif; ?>
                                         </form>
                                     </td>
                                 </tr>
@@ -383,6 +275,7 @@ if(isset($_POST['delete'])){
     </div>
 
     <script src="../js/articles.js"></script>
+    <?php render_app_date_script($pdo); ?>
     <script src="../js/global-time.js"></script>
 </body>
 </html>

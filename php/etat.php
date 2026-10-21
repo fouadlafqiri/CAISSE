@@ -1,35 +1,229 @@
 <?php
-session_start();
+require_once __DIR__ . '/auth.php';
+require_login(['admin', 'server']);
 require_once('db_connection.php');
-$currencySymbol=$pdo->query("SELECT COALESCE((SELECT setting_value FROM app_settings WHERE setting_key='currency_symbol'),'DH')")->fetchColumn();
-$start = $_GET['start'] ?? date('Y-m-01');
-$end = $_GET['end'] ?? date('Y-m-d');
+
+$periodType = $_GET['period'] ?? 'daily';
+$isAdmin = is_admin();
+if (!in_array($periodType, $isAdmin ? ['daily', 'weekly', 'custom'] : ['daily', 'weekly'], true)) {
+    $periodType = 'daily';
+}
+$today = new DateTimeImmutable('today');
+if ($periodType === 'weekly') {
+    $defaultStart = $today->modify('monday this week')->format('Y-m-d');
+    $defaultEnd = $today->modify('sunday this week')->format('Y-m-d');
+} elseif ($periodType === 'custom') {
+    $defaultStart = $today->format('Y-m-d');
+    $defaultEnd = $defaultStart;
+} else {
+    $defaultStart = $today->format('Y-m-d');
+    $defaultEnd = $defaultStart;
+}
+$start = $_GET['start'] ?? $defaultStart;
+$end = $_GET['end'] ?? $defaultEnd;
 $reportType = $_GET['type'] ?? 'sales';
-$period = [':start'=>$start, ':end'=>$end];
+if (!$isAdmin) {
+    $start = $defaultStart;
+    $end = $defaultEnd;
+    $reportType = 'sales';
+}
+$validDate = static function (string $date): bool {
+    $parsed = DateTimeImmutable::createFromFormat('!Y-m-d', $date);
+    return $parsed !== false && $parsed->format('Y-m-d') === $date;
+};
+if (!$validDate($start) || !$validDate($end)) {
+    $start = $defaultStart;
+    $end = $defaultEnd;
+}
+if ($start > $end) {
+    [$start, $end] = [$end, $start];
+}
+$params = [':start' => $start, ':end' => $end];
+if ($isAdmin && !in_array($reportType, ['sales', 'products', 'payments'], true)) {
+    $reportType = 'sales';
+}
+$salesScope = $isAdmin ? '' : ' AND s.user_id = :user_id';
+if (!$isAdmin) {
+    $params[':user_id'] = (int)$_SESSION['user_id'];
+}
+$settings = $pdo->query('SELECT setting_key, setting_value FROM app_settings')->fetchAll(PDO::FETCH_KEY_PAIR);
+$currency = $settings['currency_symbol'] ?? 'DH';
 
-$stmt=$pdo->prepare('SELECT COALESCE(SUM(total_amount),0) revenue, COUNT(*) sales_count, COUNT(DISTINCT client_id) clients FROM sales WHERE DATE(date) BETWEEN :start AND :end'); $stmt->execute($period); $stats=$stmt->fetch(PDO::FETCH_ASSOC);
-$stmt=$pdo->prepare('SELECT COALESCE(SUM((si.unit_price-p.purchase_price)*si.quantity),0) margin FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id WHERE DATE(s.date) BETWEEN :start AND :end'); $stmt->execute($period); $stats['margin']=$stmt->fetchColumn();
-$stmt=$pdo->prepare('SELECT p.name product_name,c.name category_name,SUM(si.quantity) quantity,SUM(si.total_price) revenue,p.stock_quantity FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id LEFT JOIN brands b ON b.id=p.brand_id LEFT JOIN categories c ON c.id=b.category_id WHERE DATE(s.date) BETWEEN :start AND :end GROUP BY p.id,p.name,c.name,p.stock_quantity ORDER BY quantity DESC LIMIT 10'); $stmt->execute($period); $topProducts=$stmt->fetchAll(PDO::FETCH_ASSOC);
-$stmt=$pdo->prepare('SELECT pay.method,COUNT(*) transactions,SUM(pay.amount) total FROM payments pay WHERE DATE(pay.payment_date) BETWEEN :start AND :end GROUP BY pay.method ORDER BY total DESC'); $stmt->execute($period); $paymentStats=$stmt->fetchAll(PDO::FETCH_ASSOC);
-$stmt=$pdo->prepare("SELECT DATE_FORMAT(date,'%Y-%m') month,SUM(total_amount) total FROM sales WHERE DATE(date) BETWEEN :start AND :end GROUP BY DATE_FORMAT(date,'%Y-%m') ORDER BY month"); $stmt->execute($period); $monthly=$stmt->fetchAll(PDO::FETCH_ASSOC);
-$stmt=$pdo->prepare('SELECT c.name,SUM(si.total_price) total FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id LEFT JOIN brands b ON b.id=p.brand_id LEFT JOIN categories c ON c.id=b.category_id WHERE DATE(s.date) BETWEEN :start AND :end GROUP BY c.id,c.name ORDER BY total DESC'); $stmt->execute($period); $categoryStats=$stmt->fetchAll(PDO::FETCH_ASSOC);
-$inventory=$pdo->query('SELECT p.name,p.barcode,p.stock_quantity,p.purchase_price,p.selling_price,b.name brand_name,c.name category_name FROM products p LEFT JOIN brands b ON b.id=p.brand_id LEFT JOIN categories c ON c.id=b.category_id ORDER BY p.name')->fetchAll(PDO::FETCH_ASSOC);
-$methodLabels=['cash'=>'Espèces','card'=>'Carte Bancaire','transfer'=>'Virement','check'=>'Chèque'];
+$stmt = $pdo->prepare('SELECT COALESCE(SUM(s.total_amount), 0) AS revenue, COUNT(*) AS sales_count FROM sales s WHERE DATE(s.date) BETWEEN :start AND :end' . $salesScope);
+$stmt->execute($params);
+$stats = $stmt->fetch(PDO::FETCH_ASSOC);
+
+$stmt = $pdo->prepare(
+    'SELECT DATE(s.date) AS sale_day, COUNT(*) AS sales_count, COALESCE(SUM(s.total_amount), 0) AS revenue
+     FROM sales s WHERE DATE(s.date) BETWEEN :start AND :end' . $salesScope . '
+     GROUP BY DATE(s.date) ORDER BY sale_day'
+);
+$stmt->execute($params);
+$dailyTotals = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$stmt = $pdo->prepare(
+    "SELECT DATE(s.date) AS sale_day,
+            COALESCE(si.product_name, p.name, 'Produit') AS product_name,
+            si.unit_price, SUM(si.quantity) AS quantity,
+            SUM(si.total_price) AS revenue,
+            COUNT(DISTINCT s.id) AS orders_count
+     FROM sale_items si
+     JOIN sales s ON s.id = si.sale_id
+     LEFT JOIN products p ON p.id = si.product_id
+     WHERE DATE(s.date) BETWEEN :start AND :end" . $salesScope . "
+     GROUP BY DATE(s.date), COALESCE(si.product_name, p.name, 'Produit'), si.unit_price
+     ORDER BY sale_day DESC, product_name"
+);
+$stmt->execute($params);
+$purchaseDetails = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$stmt = $pdo->prepare(
+    "SELECT COALESCE(si.product_name, p.name, 'Produit') AS product_name,
+            c.name AS category_name, SUM(si.quantity) AS quantity,
+            SUM(si.total_price) AS revenue
+     FROM sale_items si
+     JOIN sales s ON s.id = si.sale_id
+     LEFT JOIN products p ON p.id = si.product_id
+     LEFT JOIN categories c ON c.id = p.category_id
+     WHERE DATE(s.date) BETWEEN :start AND :end" . $salesScope . "
+     GROUP BY COALESCE(si.product_name, p.name, 'Produit'), c.name
+     ORDER BY quantity DESC LIMIT 20"
+);
+$stmt->execute($params);
+$topProducts = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$stmt = $pdo->prepare(
+    'SELECT pay.method, COUNT(DISTINCT pay.id) AS transactions, SUM(pay.amount) AS total
+     FROM payments pay JOIN sales s ON s.id = pay.sale_id
+     WHERE DATE(s.date) BETWEEN :start AND :end' . $salesScope . '
+     GROUP BY pay.method ORDER BY total DESC'
+);
+$stmt->execute($params);
+$paymentStats = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$methodLabels = ['cash' => 'Espèces', 'card' => 'Carte bancaire', 'transfer' => 'Virement'];
+$periodLabel = $periodType === 'daily' ? 'Journalier' : ($periodType === 'weekly' ? 'Hebdomadaire' : 'Personnalisé');
 ?>
-<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Rapports et Statistiques</title><link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet"><link rel="stylesheet" href="../css/global.css"><link rel="stylesheet" href="../css/etat.css"></head><body>
-<header class="header"><div class="header-left"><span><i class="fas fa-user"></i> User : <?=strtoupper(htmlspecialchars($_SESSION['username']??'ADMIN'))?></span></div><div class="header-center"><span id="current-time"></span></div><div class="header-right"><button class="close-btn" onclick="location.href='menu.php'">✕</button></div></header>
-<div class="container"><div class="page-title"><h2><i class="fas fa-chart-line"></i> Rapports et Statistiques</h2></div>
-<div class="stats-section"><div class="row g-3">
-<div class="col-md-3"><div class="stat-card stat-card-primary"><div class="stat-card-icon"><i class="fas fa-dollar-sign"></i></div><div class="stat-card-title">Chiffre d'Affaires</div><div class="stat-card-value"><?=number_format($stats['revenue'],2,'.',' ')?> DH</div><div class="stat-card-subtitle">Période sélectionnée</div></div></div>
-<div class="col-md-3"><div class="stat-card stat-card-info"><div class="stat-card-icon"><i class="fas fa-shopping-cart"></i></div><div class="stat-card-title">Total Ventes</div><div class="stat-card-value"><?=$stats['sales_count']?></div><div class="stat-card-subtitle">Transactions</div></div></div>
-<div class="col-md-3"><div class="stat-card stat-card-warning"><div class="stat-card-icon"><i class="fas fa-chart-pie"></i></div><div class="stat-card-title">Marge Bénéficiaire</div><div class="stat-card-value"><?=number_format($stats['margin'],2,'.',' ')?> DH</div><div class="stat-card-subtitle">Marge brute</div></div></div>
-<div class="col-md-3"><div class="stat-card stat-card-danger"><div class="stat-card-icon"><i class="fas fa-users"></i></div><div class="stat-card-title">Clients</div><div class="stat-card-value"><?=$stats['clients']?></div><div class="stat-card-subtitle">Clients de la période</div></div></div>
-</div></div>
-<div class="filter-section"><div class="filter-header"><i class="fas fa-filter"></i><span>Générer un Rapport</span></div><form method="get"><div class="row g-3 align-items-end"><div class="col-md-3"><label class="form-label"><i class="fas fa-calendar-alt"></i> Date de début</label><input type="date" name="start" class="form-control" value="<?=htmlspecialchars($start)?>"></div><div class="col-md-3"><label class="form-label"><i class="fas fa-calendar-check"></i> Date de fin</label><input type="date" name="end" class="form-control" value="<?=htmlspecialchars($end)?>"></div><div class="col-md-3"><label class="form-label"><i class="fas fa-list"></i> Type de rapport</label><select name="type" class="form-select"><option value="sales" <?=$reportType==='sales'?'selected':''?>>Rapport des ventes</option><option value="products" <?=$reportType==='products'?'selected':''?>>Produits vendus</option><option value="payments" <?=$reportType==='payments'?'selected':''?>>Méthodes de paiement</option><option value="inventory" <?=$reportType==='inventory'?'selected':''?>>État des stocks</option></select></div><div class="col-md-3"><button class="btn btn-generate w-100"><i class="fas fa-file-alt"></i> Générer Rapport</button></div></div></form></div>
+<!doctype html>
+<html lang="fr">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Rapports des ventes</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="../css/global.css">
+    <link rel="stylesheet" href="../css/etat.css?v=2">
+</head>
+<body>
+    <header class="header">
+        <div class="header-left"><span><i class="fas fa-user"></i> <?= $isAdmin ? 'Administrateur' : 'Serveur' ?> : <?=strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN'))?></span></div>
+        <div class="header-center"><span id="current-time"></span></div>
+        <div class="header-right"><button class="close-btn" onclick="location.href='menu.php'">✕</button></div>
+    </header>
+    <section class="print-report">
+        <header class="print-report-header">
+            <h1>Rapport des ventes</h1>
+            <p>Période : <?=htmlspecialchars($start)?> au <?=htmlspecialchars($end)?></p>
+        </header>
+        <div class="print-report-revenue">
+            <span>Chiffre d’affaires total</span>
+            <strong><?=number_format((float)$stats['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></strong>
+        </div>
+        <table class="print-report-table">
+            <thead><tr><th>Date</th><th>Produit</th><th>Quantité</th><th>Prix unitaire</th><th>Total vendu</th></tr></thead>
+            <tbody>
+                <?php foreach ($purchaseDetails as $item): ?>
+                    <tr>
+                        <td><?=htmlspecialchars($item['sale_day'])?></td>
+                        <td><?=htmlspecialchars($item['product_name'])?></td>
+                        <td><?=(int)$item['quantity']?></td>
+                        <td><?=number_format((float)$item['unit_price'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td>
+                        <td><?=number_format((float)$item['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if (!$purchaseDetails): ?><tr><td colspan="5">Aucun produit vendu sur cette période.</td></tr><?php endif; ?>
+            </tbody>
+        </table>
+    </section>
+    <div class="container">
+        <div class="page-title"><h2><i class="fas fa-chart-line"></i> Rapports des ventes</h2></div>
+        <div class="d-flex flex-wrap gap-2 mb-3 period-actions">
+            <a class="btn <?=$periodType === 'daily' ? 'btn-success' : 'btn-outline-success'?>" href="?period=daily">Aujourd’hui</a>
+            <a class="btn <?=$periodType === 'weekly' ? 'btn-success' : 'btn-outline-success'?>" href="?period=weekly">Cette semaine</a>
+            <?php if ($isAdmin): ?><a class="btn <?=$periodType === 'custom' ? 'btn-success' : 'btn-outline-success'?>" href="?period=custom">Période personnalisée</a><?php endif; ?>
+        </div>
 
-<div class="charts-section"><div class="row g-3"><div class="col-md-8"><div class="chart-card"><h5><i class="fas fa-chart-bar text-primary"></i> Évolution des Ventes Mensuelles</h5><div class="chart-placeholder"><div class="text-center"><?php if($monthly): foreach($monthly as $month): ?><div><strong><?=htmlspecialchars($month['month'])?></strong> : <?=number_format($month['total'],2,'.',' ')?> DH</div><?php endforeach; else: ?><div>Aucune vente sur la période.</div><?php endif; ?></div></div></div></div><div class="col-md-4"><div class="chart-card"><h5><i class="fas fa-chart-pie text-warning"></i> Ventes par Catégorie</h5><div class="chart-placeholder"><div class="text-center"><?php if($categoryStats): foreach($categoryStats as $category): ?><div><strong><?=htmlspecialchars($category['name']??'Sans catégorie')?></strong> : <?=number_format($category['total'],2,'.',' ')?> DH</div><?php endforeach; else: ?><div>Aucune vente.</div><?php endif; ?></div></div></div></div></div></div>
+        <section class="stats-section">
+            <div class="row g-3">
+                <div class="col-md-6"><div class="stat-card stat-card-primary"><div class="stat-card-icon"><i class="fas fa-money-bill-wave"></i></div><div class="stat-card-title">Chiffre d’affaires · <?=htmlspecialchars($periodLabel)?></div><div class="stat-card-value"><?=number_format((float)$stats['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></div><div class="stat-card-subtitle"><?=htmlspecialchars($start)?> au <?=htmlspecialchars($end)?></div></div></div>
+                <div class="col-md-6"><div class="stat-card stat-card-info"><div class="stat-card-icon"><i class="fas fa-receipt"></i></div><div class="stat-card-title">Commandes validées</div><div class="stat-card-value"><?=(int)$stats['sales_count']?></div><div class="stat-card-subtitle">Sur la période</div></div></div>
+            </div>
+        </section>
 
-<div class="table-card"><div class="table-header"><div class="table-title"><i class="fas fa-trophy"></i><span>Top 10 des Produits les Plus Vendus</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-excel"></i> Exporter</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div><div class="table-responsive"><table class="table table-hover"><thead><tr><th>Rang</th><th>Produit</th><th>Catégorie</th><th>Quantité Vendue</th><th>Chiffre d'Affaires</th><th>Statut</th></tr></thead><tbody><?php foreach($topProducts as $i=>$product): $status=$product['stock_quantity']>20?'En stock':($product['stock_quantity']>0?'Stock bas':'Rupture'); $badge=$product['stock_quantity']>20?'success':($product['stock_quantity']>0?'warning':'danger'); ?><tr><td><strong>#<?=$i+1?></strong></td><td><?=htmlspecialchars($product['product_name'])?></td><td><?=htmlspecialchars($product['category_name']??'')?></td><td><strong><?=$product['quantity']?></strong></td><td class="amount-cell"><?=number_format($product['revenue'],2,'.',' ')?> DH</td><td><span class="badge-custom badge-<?=$badge?>"><?=$status?></span></td></tr><?php endforeach; ?><?php if(!$topProducts): ?><tr><td colspan="6">Aucune vente.</td></tr><?php endif; ?></tbody></table></div></div>
-<div class="table-card"><div class="table-header"><div class="table-title"><i class="fas fa-credit-card"></i><span>Ventes par Méthode de Paiement</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-excel"></i> Exporter</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div><div class="table-responsive"><table class="table table-hover"><thead><tr><th>Méthode</th><th>Nombre de Transactions</th><th>Montant Total</th><th>Pourcentage</th></tr></thead><tbody><?php foreach($paymentStats as $payment): $percentage=$stats['revenue']>0?($payment['total']/$stats['revenue']*100):0; ?><tr><td><strong><?=htmlspecialchars($methodLabels[$payment['method']]??$payment['method'])?></strong></td><td><?=$payment['transactions']?></td><td class="amount-cell"><?=number_format($payment['total'],2,'.',' ')?> DH</td><td><strong><?=number_format($percentage,1)?>%</strong></td></tr><?php endforeach; ?><?php if(!$paymentStats): ?><tr><td colspan="4">Aucun paiement.</td></tr><?php endif; ?></tbody></table></div></div>
-<div class="table-card" id="inventory-report"><div class="table-header"><div class="table-title"><i class="fas fa-warehouse"></i><span>État des Stocks</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-excel"></i> Exporter</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div><div class="table-responsive"><table class="table table-hover"><thead><tr><th>Produit</th><th>Code-barres</th><th>Catégorie</th><th>Marque</th><th>Prix Achat</th><th>Prix Vente</th><th>Stock</th></tr></thead><tbody><?php foreach($inventory as $product): ?><tr><td><?=htmlspecialchars($product['name'])?></td><td><?=htmlspecialchars($product['barcode'])?></td><td><?=htmlspecialchars($product['category_name']??'')?></td><td><?=htmlspecialchars($product['brand_name']??'')?></td><td><?=number_format($product['purchase_price'],2,'.',' ')?> DH</td><td><?=number_format($product['selling_price'],2,'.',' ')?> DH</td><td><?=$product['stock_quantity']?></td></tr><?php endforeach; ?></tbody></table></div></div>
-</div><script>const selectedReportType=<?=json_encode($reportType)?>;const reportCards=document.querySelectorAll('.table-card');document.querySelector('.charts-section').style.display=selectedReportType==='sales'?'':'none';reportCards[0].style.display=['sales','products'].includes(selectedReportType)?'':'none';reportCards[1].style.display=['sales','payments'].includes(selectedReportType)?'':'none';document.getElementById('inventory-report').style.display=selectedReportType==='inventory'?'':'none';</script><script src="../js/etat.js"></script><script src="../js/global-time.js"></script></body></html>
+        <?php if ($isAdmin): ?><section class="filter-section">
+            <div class="filter-header"><i class="fas fa-calendar-alt"></i><span>Filtrer le rapport</span></div>
+            <form method="get" class="row g-3 align-items-end">
+                <input type="hidden" name="period" value="<?=$periodType?>">
+                <div class="col-md-4"><label class="form-label">Du</label><input type="date" name="start" class="form-control" value="<?=htmlspecialchars($start)?>" required></div>
+                <div class="col-md-4"><label class="form-label">Au</label><input type="date" name="end" class="form-control" value="<?=htmlspecialchars($end)?>" required></div>
+                <div class="col-md-4"><label class="form-label">Détail</label><select name="type" class="form-select">
+                    <option value="sales" <?=$reportType === 'sales' ? 'selected' : ''?>>Ventes par jour</option>
+                    <option value="products" <?=$reportType === 'products' ? 'selected' : ''?>>Produits vendus</option>
+                    <option value="payments" <?=$reportType === 'payments' ? 'selected' : ''?>>Méthodes de paiement</option>
+                </select></div>
+                <div class="col-12 text-end"><button class="btn btn-generate"><i class="fas fa-file-alt"></i> Générer</button></div>
+            </form>
+        </section><?php endif; ?>
+
+        <section class="table-card report-table" data-report="sales">
+            <div class="table-header"><div class="table-title"><i class="fas fa-calendar-day"></i><span>Ventes par jour</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-csv"></i> Exporter CSV</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div>
+            <div class="table-responsive"><table class="table table-hover"><thead><tr><th>Date</th><th>Commandes</th><th>Chiffre d’affaires</th></tr></thead><tbody>
+                <?php foreach ($dailyTotals as $row): ?><tr><td><?=htmlspecialchars($row['sale_day'])?></td><td><?=(int)$row['sales_count']?></td><td><?=number_format((float)$row['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td></tr><?php endforeach; ?>
+                <?php if (!$dailyTotals): ?><tr><td colspan="3">Aucune vente sur cette période.</td></tr><?php endif; ?>
+            </tbody></table></div>
+        </section>
+
+        <section class="table-card report-table" data-report="sales">
+            <div class="table-header"><div class="table-title"><i class="fas fa-mug-hot"></i><span>Articles achetés sur la période (<?=htmlspecialchars($start)?> au <?=htmlspecialchars($end)?>)</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-csv"></i> Exporter CSV</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div>
+            <div class="table-responsive"><table class="table table-hover"><thead><tr><th>Date</th><th>Produit</th><th>Commandes</th><th>Quantité vendue</th><th>Prix unitaire historique</th><th>Total vendu</th></tr></thead><tbody>
+                <?php foreach ($purchaseDetails as $item): ?>
+                    <tr>
+                        <td><?=htmlspecialchars($item['sale_day'])?></td>
+                        <td><?=htmlspecialchars($item['product_name'])?></td>
+                        <td><?=(int)$item['orders_count']?></td>
+                        <td><?=(int)$item['quantity']?></td>
+                        <td><?=number_format((float)$item['unit_price'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td>
+                        <td><?=number_format((float)$item['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if (!$purchaseDetails): ?><tr><td colspan="6">Aucun produit acheté sur cette période.</td></tr><?php endif; ?>
+            </tbody></table></div>
+        </section>
+
+        <section class="table-card report-table" data-report="products">
+            <div class="table-header"><div class="table-title"><i class="fas fa-mug-hot"></i><span>Produits vendus</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-csv"></i> Exporter CSV</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div>
+            <div class="table-responsive"><table class="table table-hover"><thead><tr><th>Produit</th><th>Catégorie</th><th>Quantité vendue</th><th>Chiffre d’affaires historique</th></tr></thead><tbody>
+                <?php foreach ($topProducts as $product): ?><tr><td><?=htmlspecialchars($product['product_name'])?></td><td><?=htmlspecialchars($product['category_name'] ?? '—')?></td><td><?=(int)$product['quantity']?></td><td><?=number_format((float)$product['revenue'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td></tr><?php endforeach; ?>
+                <?php if (!$topProducts): ?><tr><td colspan="4">Aucun produit vendu sur cette période.</td></tr><?php endif; ?>
+            </tbody></table></div>
+        </section>
+
+        <section class="table-card report-table" data-report="payments">
+            <div class="table-header"><div class="table-title"><i class="fas fa-credit-card"></i><span>Ventes par moyen de paiement</span></div><div class="table-actions"><button class="btn-export"><i class="fas fa-file-csv"></i> Exporter CSV</button><button class="btn-print"><i class="fas fa-print"></i> Imprimer</button></div></div>
+            <div class="table-responsive"><table class="table table-hover"><thead><tr><th>Moyen de paiement</th><th>Transactions</th><th>Montant</th></tr></thead><tbody>
+                <?php foreach ($paymentStats as $payment): ?><tr><td><?=htmlspecialchars($methodLabels[$payment['method']] ?? $payment['method'])?></td><td><?=(int)$payment['transactions']?></td><td><?=number_format((float)$payment['total'], 2, ',', ' ')?> <?=htmlspecialchars($currency)?></td></tr><?php endforeach; ?>
+                <?php if (!$paymentStats): ?><tr><td colspan="3">Aucun paiement sur cette période.</td></tr><?php endif; ?>
+            </tbody></table></div>
+        </section>
+    </div>
+    <script>
+        const selectedReportType = <?=json_encode($reportType)?>;
+        document.querySelectorAll('.report-table').forEach(section => {
+            section.hidden = selectedReportType !== section.dataset.report;
+        });
+    </script>
+    <script src="../js/etat.js"></script>
+    <?php render_app_date_script($pdo); ?>
+    <script src="../js/global-time.js"></script>
+</body>
+</html>

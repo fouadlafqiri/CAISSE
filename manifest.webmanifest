@@ -1,0 +1,27 @@
+{
+  "id": "./",
+  "name": "Café / Restaurant - Caisse",
+  "short_name": "Caisse Café",
+  "description": "Application de caisse pour café et restaurant.",
+  "lang": "fr",
+  "start_url": "./index.php",
+  "scope": "./",
+  "display": "fullscreen",
+  "display_override": ["fullscreen", "standalone"],
+  "background_color": "#f8f9fa",
+  "theme_color": "#28a745",
+  "icons": [
+    {
+      "src": "./imgs/app-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./imgs/app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

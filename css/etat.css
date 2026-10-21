@@ -309,6 +309,15 @@ body {
     vertical-align: middle;
 }
 
+.report-table .table thead th {
+    background: #343a40 !important;
+    color: #fff !important;
+    font-size: 0.88rem;
+    font-weight: 700;
+    padding: 12px 10px;
+    white-space: nowrap;
+}
+
 .table tbody td {
     padding: 7px 10px;
     font-size: 0.78rem;
@@ -317,7 +326,113 @@ body {
     border-bottom: 1px solid #f1f3f4;
 }
 
+.report-table[data-report="sales"] .table tbody td {
+    color: #212529;
+    font-size: 0.9rem;
+    padding: 11px 10px;
+}
+
+.report-table[data-report="sales"] tbody td:first-child,
+.report-table[data-report="sales"] tbody td:nth-child(2),
+.report-table[data-report="sales"] tbody td:nth-child(4) {
+    font-weight: 600;
+}
+
+.report-table[data-report="sales"] tbody td:nth-child(2) {
+    text-align: left;
+}
+
 .table tbody tr:hover { background: rgba(40, 167, 69, 0.05); }
+
+.print-report {
+    display: none;
+}
+
+@media print {
+    @page {
+        size: A4 portrait;
+        margin: 15mm;
+    }
+
+    html,
+    body {
+        height: auto !important;
+        overflow: visible !important;
+        background: #fff !important;
+    }
+
+    body.print-sales-report {
+        color: #111;
+        font-family: Arial, sans-serif;
+        font-size: 11pt;
+    }
+
+    body.print-sales-report > :not(.print-report) {
+        display: none !important;
+    }
+
+    body.print-sales-report .print-report {
+        display: block !important;
+        width: 100%;
+        color: #111;
+        background: #fff;
+    }
+
+    .print-report-header {
+        margin-bottom: 20px;
+        text-align: center;
+    }
+
+    .print-report-header h1 {
+        margin: 0 0 6px;
+        font-size: 20pt;
+        font-weight: 700;
+    }
+
+    .print-report-header p {
+        margin: 0;
+        color: #444;
+    }
+
+    .print-report-revenue {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 18px;
+        padding: 12px 14px;
+        border: 1px solid #888;
+        font-size: 12pt;
+    }
+
+    .print-report-revenue strong {
+        font-size: 16pt;
+    }
+
+    .print-report-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .print-report-table thead {
+        display: table-header-group;
+    }
+
+    .print-report-table th,
+    .print-report-table td {
+        padding: 8px;
+        border: 1px solid #999;
+        text-align: left;
+    }
+
+    .print-report-table th {
+        background: #eee !important;
+        font-weight: 700;
+    }
+
+    .print-report-table tr {
+        break-inside: avoid;
+    }
+}
 .table tbody tr:last-child td { border-bottom: none; }
 
 /* Amount cell */

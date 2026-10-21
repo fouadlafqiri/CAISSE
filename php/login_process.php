@@ -1,5 +1,5 @@
 <?php
-session_start();
+require_once __DIR__ . '/session_bootstrap.php';
 include('db_connection.php');
 
 if (!isset($_POST['username']) || !isset($_POST['password'])) {
@@ -21,9 +21,10 @@ try {
 
     if ($user) {
         if (password_verify($password, $user['password'])) {
+            session_regenerate_id(true);
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['username'] = $user['username'];
-            $_SESSION['role'] = $user['role'];
+            $_SESSION['role'] = ['owner' => 'admin', 'assistant' => 'server'][$user['role']] ?? $user['role'];
             header("Location: menu.php");
             exit();
         } else {

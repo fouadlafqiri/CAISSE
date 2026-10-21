@@ -1,4 +1,6 @@
-<?php 
+<?php
+require_once __DIR__ . '/../auth.php';
+require_login(['admin']);
 require '../db_connection.php';
 
 if(isset($_POST['category_id'])) {

@@ -1,5 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/auth.php';
+require_login(['admin']);
 require_once('db_connection.php');
 $currencySymbol=$pdo->query("SELECT COALESCE((SELECT setting_value FROM app_settings WHERE setting_key='currency_symbol'),'DH')")->fetchColumn();
 
@@ -318,7 +319,7 @@ $expenses = $pdo->query('SELECT * FROM expenses ORDER BY expense_date DESC, id D
 
   <header class="header">
     <div class="header-left">
-      <span><i class="fas fa-user"></i> User : <?php echo strtoupper($_SESSION['username'] ?? 'ADMIN')  ?></span>
+      <span><i class="fas fa-user"></i> Administrateur : <?php echo strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN'))  ?></span>
     </div>
     <div class="header-center">
       <span id="current-time"></span>

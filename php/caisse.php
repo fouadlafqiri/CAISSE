@@ -1,5 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/auth.php';
+require_login(['admin', 'server']);
 require_once('db_connection.php');
 
 $appSettings = [];
@@ -18,7 +19,6 @@ if (!$allowedPaymentMethods) {
     $paymentMethods['cash'] = true;
     $allowedPaymentMethods = ['cash'];
 }
-$nextSaleId = (int)$pdo->query('SELECT COALESCE(MAX(id), 0) + 1 FROM sales')->fetchColumn();
 $currencySymbol = $appSettings['currency_symbol'] ?? 'DH';
 $invoiceHeader = $appSettings['invoice_header'] ?? 'Facture de Vente';
 $invoiceFooter = $appSettings['invoice_footer'] ?? 'Merci pour votre achat !';
@@ -27,10 +27,10 @@ $autoPrint = ($appSettings['auto_print'] ?? '0') === '1';
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE'] ?? '', 'application/json')) {
     header('Content-Type: application/json; charset=utf-8');
     $data = json_decode(file_get_contents('php://input'), true);
-    $items = $data['items'] ?? [];
-    $paymentMethod = $data['payment_method'] ?? '';
+    $items = is_array($data) ? ($data['items'] ?? []) : [];
+    $paymentMethod = is_array($data) ? ($data['payment_method'] ?? '') : '';
 
-    if (!$items || !in_array($paymentMethod, $allowedPaymentMethods, true)) {
+    if (!is_array($items) || !$items || !in_array($paymentMethod, $allowedPaymentMethods, true)) {
         http_response_code(422);
         echo json_encode(['success' => false, 'message' => 'Données de vente invalides.']);
         exit();
@@ -48,28 +48,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                 throw new RuntimeException('Produit ou quantité invalide.');
             }
 
-            $stmt = $pdo->prepare('SELECT id, name, selling_price, stock_quantity FROM products WHERE id = :id FOR UPDATE');
+            $stmt = $pdo->prepare('SELECT id, name, selling_price FROM products WHERE id = :id AND is_active = 1 FOR UPDATE');
             $stmt->execute([':id' => $productId]);
             $product = $stmt->fetch(PDO::FETCH_ASSOC);
-            if (!$product || (int)$product['stock_quantity'] < $quantity) {
-                throw new RuntimeException('Stock insuffisant pour ' . ($product['name'] ?? 'un produit') . '.');
+            if (!$product) {
+                throw new RuntimeException('Produit indisponible ou introuvable.');
             }
 
-            $unitPrice = (float)$product['selling_price'];
-            $lineTotal = $unitPrice * $quantity;
+            $unitPrice = round((float)$product['selling_price'], 2);
+            $lineTotal = round($unitPrice * $quantity, 2);
             $total += $lineTotal;
-            $saleItems[] = compact('productId', 'quantity', 'unitPrice', 'lineTotal');
+            $saleItems[] = [
+                'productId' => $productId,
+                'productName' => $product['name'],
+                'quantity' => $quantity,
+                'unitPrice' => $unitPrice,
+                'lineTotal' => $lineTotal,
+            ];
         }
+        $total = round($total, 2);
 
         $stmt = $pdo->prepare('INSERT INTO sales (total_amount, payment_type, user_id) VALUES (:total, :payment_type, :user_id)');
         $stmt->execute([':total' => $total, ':payment_type' => $paymentMethod, ':user_id' => $_SESSION['user_id'] ?? null]);
         $saleId = (int)$pdo->lastInsertId();
 
-        $itemStmt = $pdo->prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total_price) VALUES (:sale_id, :product_id, :quantity, :unit_price, :total_price)');
-        $stockStmt = $pdo->prepare('UPDATE products SET stock_quantity = stock_quantity - :quantity WHERE id = :id');
+        $itemStmt = $pdo->prepare('INSERT INTO sale_items (sale_id, product_id, product_name, quantity, unit_price, total_price) VALUES (:sale_id, :product_id, :product_name, :quantity, :unit_price, :total_price)');
         foreach ($saleItems as $saleItem) {
-            $itemStmt->execute([':sale_id' => $saleId, ':product_id' => $saleItem['productId'], ':quantity' => $saleItem['quantity'], ':unit_price' => $saleItem['unitPrice'], ':total_price' => $saleItem['lineTotal']]);
-            $stockStmt->execute([':quantity' => $saleItem['quantity'], ':id' => $saleItem['productId']]);
+            $itemStmt->execute([':sale_id' => $saleId, ':product_id' => $saleItem['productId'], ':product_name' => $saleItem['productName'], ':quantity' => $saleItem['quantity'], ':unit_price' => $saleItem['unitPrice'], ':total_price' => $saleItem['lineTotal']]);
         }
 
         $stmt = $pdo->prepare('INSERT INTO payments (sale_id, amount, method) VALUES (:sale_id, :amount, :method)');
@@ -109,7 +114,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 <body>
     <header class="header">
         <div class="header-left">
-            <span><i class="fas fa-user"></i> User : <?php echo strtoupper($_SESSION['username'] ?? 'ADMIN')  ?></span>
+            <span><i class="fas fa-user"></i> Serveur : <?php echo strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN'))  ?></span>
         </div>
         <div class="header-center">
             <span id="current-time"></span>
@@ -122,19 +127,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
     <div class="main-container">
         <!-- Left Panel -->
         <div class="left-panel">
-            <!-- Ticket Header -->
-            <div class="ticket-header">
-                <h3><i class="fas fa-receipt"></i> Informations Facture</h3>
-                <div class="form-group">
-                    <label>Code :</label>
-                    <input type="text" name="product_code" placeholder="Entrez le code...">
-                </div>
-                <div class="form-group">
-                    <label>N° Facture :</label>
-                    <div class="ticket-number">TCK-<?=str_pad($nextSaleId, 4, '0', STR_PAD_LEFT)?></div>
-                </div>
-            </div>
-
             <!-- Invoice Section -->
             <div class="invoice-section">
                 <div class="invoice-table">
@@ -163,23 +155,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 
                 <!-- Action Buttons -->
                 <div class="action-buttons">
-                    <button class="action-btn btn-add" id="addBtn">
-                        <i class="fas fa-plus"></i> Ajouter
-                    </button>
-                    <button class="action-btn btn-edit" id="editBtn">
-                        <i class="fas fa-edit"></i> Modifier
-                    </button>
                     <button class="action-btn btn-delete" id="deleteBtn">
                         <i class="fas fa-trash"></i> Supprimer
                     </button>
-                    <button class="action-btn btn-return">
-                        <i class="fas fa-undo"></i> Retour
-                    </button>
                     <button class="action-btn btn-clear" id="viderBtn">
                         <i class="fas fa-broom"></i> Vider
-                    </button>
-                    <button class="action-btn btn-cash">
-                        <i class="fas fa-cash-register"></i> Caisse
                     </button>
                     <button class="action-btn btn-complete">
                         <i class="fas fa-check-circle"></i> Finaliser Vente
@@ -201,15 +181,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                     <span class="nav-breadcrumb-item" id="navCategory" style="display: none;">
                         <i class="fas fa-list"></i> <span id="navCategoryName"></span>
                     </span>
-                    <span class="nav-breadcrumb-separator" id="navSep2" style="display: none;">
-                        <i class="fas fa-chevron-right"></i>
-                    </span>
-                    <span class="nav-breadcrumb-item" id="navBrand" style="display: none;">
-                        <i class="fas fa-bookmark"></i> <span id="navBrandName"></span>
-                    </span>
                 </div>
-                <button class="nav-back-btn" id="navBackBtn" style="display: none;">
-                    <i class="fas fa-arrow-left"></i> Retour
+                <button type="button" class="nav-back-btn" id="navBackCategories" style="display: none;">
+                    <i class="fas fa-arrow-left"></i> Autres catégories
                 </button>
             </div>
 
@@ -219,42 +193,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
             </div>
         </div>
 
-    </div>
-
-    <div class="barcode-keypad-overlay" id="barcodeKeypadOverlay">
-        <div class="barcode-keypad-popup">
-            <div class="barcode-keypad-header">
-                <h3><i class="fas fa-barcode"></i> Entrer Code Produit</h3>
-                <p>Saisissez le code-barres</p>
-            </div>
-
-            <div class="barcode-display" id="barcodeDisplay"></div>
-
-            <div class="barcode-keypad-grid">
-                <button class="barcode-keypad-btn" data-number="1">1</button>
-                <button class="barcode-keypad-btn" data-number="2">2</button>
-                <button class="barcode-keypad-btn" data-number="3">3</button>
-                <button class="barcode-keypad-btn" data-number="4">4</button>
-                <button class="barcode-keypad-btn" data-number="5">5</button>
-                <button class="barcode-keypad-btn" data-number="6">6</button>
-                <button class="barcode-keypad-btn" data-number="7">7</button>
-                <button class="barcode-keypad-btn" data-number="8">8</button>
-                <button class="barcode-keypad-btn" data-number="9">9</button>
-                <button class="barcode-keypad-btn" data-number="0">0</button>
-                <button class="barcode-keypad-btn barcode-keypad-special" data-action="clear">
-                    <i class="fas fa-backspace"></i> Effacer
-                </button>
-            </div>
-
-            <div class="barcode-keypad-actions">
-                <button class="barcode-keypad-action-btn btn-cancel" id="barcodeCancelBtn">
-                    <i class="fas fa-times"></i> Annuler
-                </button>
-                <button class="barcode-keypad-action-btn btn-confirm" id="barcodeConfirmBtn">
-                    <i class="fas fa-search"></i> Rechercher
-                </button>
-            </div>
-        </div>
     </div>
 
     <!-- Keypad Popup -->
@@ -309,9 +247,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                 <!-- Body -->
                 <div class="modal-body bg-white">
                     <div class="d-flex justify-content-between mb-3">
-                        <p><strong><i class="fas fa-receipt text-success"></i> N° Facture:</strong>
-                            <span id="invoiceNumber" class="text-success fw-bold">TCK-<?=str_pad($nextSaleId, 4, '0', STR_PAD_LEFT)?></span>
-                        </p>
                         <p><strong><i class="fas fa-calendar text-info"></i> Date:</strong>
                             <span id="invoiceDate" class="text-primary fw-bold"></span>
                         </p>
@@ -410,6 +345,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 
 
 
+    <?php render_app_date_script($pdo); ?>
     <script src="../js/global-time.js"></script>
     <script src="../js/frameWork/jquery-3.7.1.js"></script>
 
@@ -427,16 +363,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
         const cancelBtn = document.getElementById('cancelBtn');
         const confirmBtn = document.getElementById('confirmBtn');
 
-        // Barcode keypad
-        const barcodeKeypadOverlay = document.getElementById('barcodeKeypadOverlay');
-        const barcodeDisplay = document.getElementById('barcodeDisplay');
-        const barcodeCancelBtn = document.getElementById('barcodeCancelBtn');
-        const barcodeConfirmBtn = document.getElementById('barcodeConfirmBtn');
-        const productCodeInput = document.querySelector('input[name="product_code"]');
-
         // Boutons action
-        const addBtn = document.getElementById('addBtn');
-        const editBtn = document.getElementById('editBtn');
         const deleteBtn = document.getElementById('deleteBtn');
         const viderBtn = document.getElementById('viderBtn');
 
@@ -449,10 +376,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
         const navSep1 = document.getElementById('navSep1');
         const navCategory = document.getElementById('navCategory');
         const navCategoryName = document.getElementById('navCategoryName');
-        const navSep2 = document.getElementById('navSep2');
-        const navBrand = document.getElementById('navBrand');
-        const navBrandName = document.getElementById('navBrandName');
-        const backBtn = document.getElementById('navBackBtn');
+        const navBackCategories = document.getElementById('navBackCategories');
 
         // Grid
         const dynamicGrid = document.getElementById('dynamicGrid');
@@ -470,10 +394,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
         //=============================
 
         let currentQuantity = '0';
-        let currentAction = null; //add,edit,barcode
+        let currentAction = null;
         let currentRow = null;
-
-        let currentBarcode = '';
 
         let selectedProduct = null;
 
@@ -481,9 +403,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 
         let currentView = 'categories';
         let selectedCategory = null;
-        let selectedBrand = null;
         let categoriesData = [];
-        let brandsData = [];
 
         //===================
         // The start of code 
@@ -571,31 +491,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
             })
         }
 
-        function showBrands(categoryId) {
-            selectedCategory = categoriesData.find(c => c.id == categoryId)
-            currentView = 'brands';
-            updateBreadcrumb();
-            dynamicGrid.innerHTML = '';
-
-            $.ajax({
-                method: "POST",
-                dataType: "json",
-                url: "./AJAX/brands_ajax.php",
-                data: {
-                    category_id: categoryId,
-                },
-                success: function(brands, textStatus, XHR) {
-                    brandsData = brands;
-                    brands.forEach((brand) => {
-                        dynamicGrid.appendChild(createBrandCard(brand));
-                    })
-                }
-            })
-        }
-
-
-        function showProducts(brandId) {
-            selectedBrand = brandsData.find(b => b.id == brandId)
+        function showProducts(categoryId) {
+            selectedCategory = categoriesData.find(category => Number(category.id) === Number(categoryId));
             currentView = 'products';
             updateBreadcrumb();
             dynamicGrid.innerHTML = '';
@@ -605,59 +502,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                 dataType: "json",
                 url: "./AJAX/products_ajax.php",
                 data: {
-                    brand_id: brandId,
+                    category_id: categoryId,
                 },
                 success: function(products, textStatus, XHR) {
                     products.forEach((product) => {
                         dynamicGrid.appendChild(createProductCard(product));
                     })
+                    if (!products.length) {
+                        dynamicGrid.textContent = 'Aucun produit actif dans cette catégorie. Ajoutez-en depuis Gestion des produits.';
+                    }
+                },
+                error: function() {
+                    dynamicGrid.textContent = 'Impossible de charger les produits.';
                 }
             })
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, char => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[char]);
         }
 
         function createCategoryCard(category) {
             let card = document.createElement("div");
             card.className = 'product-card category-card';
+            const categoryPhotos = {
+                'cafés': '../imgs/CLYO_photos_carres/04_Cappuccino.jpg',
+                'cafes': '../imgs/CLYO_photos_carres/04_Cappuccino.jpg',
+                'thés': '../imgs/CLYO_photos_carres/03_The.jpg',
+                'thes': '../imgs/CLYO_photos_carres/03_The.jpg',
+                'thés et infusions': '../imgs/CLYO_photos_carres/03_The.jpg',
+                'boissons froides': '../imgs/CLYO_photos_carres/07_Jus_Orange.jpg',
+                'croissantes': '../imgs/CLYO_photos_carres/16_Viennoiserie.jpg',
+                'viennoiseries': '../imgs/CLYO_photos_carres/16_Viennoiserie.jpg',
+                'desserts': '../imgs/CLYO_photos_carres/16_Viennoiserie.jpg',
+                'pâtisseries et desserts': '../imgs/CLYO_photos_carres/16_Viennoiserie.jpg',
+                'patisseries et desserts': '../imgs/CLYO_photos_carres/16_Viennoiserie.jpg',
+                'repas': '../imgs/CLYO_photos_carres/13_Petit_Dejeuner_Simple.jpg',
+                'sandwichs': '../imgs/CLYO_photos_carres/15_Petit_Dejeuner_Fromage.jpg',
+                'snacks': '../imgs/CLYO_photos_carres/14_Petit_Dejeuner_Khli3.jpg'
+            };
+            const categoryImage = category.image || categoryPhotos[String(category.name).toLocaleLowerCase()] || '';
             card.innerHTML = `
-                <div class="product-image">
-                    <img src="${category.image}" 
-                        alt="${category.name}" 
-                        onerror="this.style.display='none'">   
+                <div class="product-image${categoryImage ? ' has-image' : ''}">
+                    ${categoryImage ? `<img src="${escapeHtml(categoryImage)}" alt="${escapeHtml(category.name)}" onerror="this.parentElement.classList.remove('has-image'); this.remove()">` : '<i class="fas fa-mug-hot"></i>'}
                 </div>
-                <div class="product-name">${category.name}</div>
+                <div class="product-name">${escapeHtml(category.name)}</div>
             `;
-            card.addEventListener('click', () => showBrands(category.id))
-            return card;
-        }
-
-        function createBrandCard(brand) {
-            let card = document.createElement("div");
-            card.className = 'product-card brand-card';
-            card.innerHTML = `
-                <div class="product-image">
-                    <img src="${brand.image}" 
-                        alt="${brand.name}" 
-                        onerror="this.style.display='none'">
-                </div>
-                <div class="product-name">${brand.name}</div>
-            `;
-            card.addEventListener('click', () => showProducts(brand.id));
+            card.addEventListener('click', () => showProducts(category.id))
             return card;
         }
 
         function createProductCard(product) {
             product.id = Number(product.id);
             product.selling_price = Number(product.selling_price);
-            product.stock_quantity = Number(product.stock_quantity);
             let card = document.createElement("div");
             card.className = 'product-card';
             card.innerHTML = `
-                <div class="product-image">
-                    <img src="${product.image}" 
-                        alt="${product.name}" 
-                        onerror="this.style.display='none'">
+                <div class="product-image${product.image ? ' has-image' : ''}">
+                    ${product.image ? `<img src="${escapeHtml(product.image)}" alt="${escapeHtml(product.name)}" onerror="this.parentElement.classList.remove('has-image'); this.remove()">` : '<i class="fas fa-mug-hot"></i>'}
                 </div>
-                <div class="product-name">${product.name}</div>
+                <div class="product-name">${escapeHtml(product.name)}</div>
                 <div class="product-price">${product.selling_price.toFixed(2)} ${currencySymbol}</div>
             `;
 
@@ -676,22 +582,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 
 
         function updateBreadcrumb() {
-            [navSep1, navCategory, navSep2, navBrand].forEach(el => el.style.display = 'none');
-            backBtn.style.display = 'none';
-
-            if (currentView === 'brands') {
+            navSep1.style.display = 'none';
+            navCategory.style.display = 'none';
+            navBackCategories.style.display = currentView === 'products' ? 'inline-flex' : 'none';
+            if (currentView === 'products') {
                 navSep1.style.display = 'inline';
                 navCategory.style.display = 'inline';
-                navCategoryName.textContent = selectedCategory.name;
-                backBtn.style.display = 'inline-block';
-            } else if (currentView === 'products') {
-                navSep1.style.display = 'inline';
-                navCategory.style.display = 'inline';
-                navCategoryName.textContent = selectedCategory.name;
-                navSep2.style.display = 'inline';
-                navBrand.style.display = 'inline';
-                navBrandName.textContent = selectedBrand.name;
-                backBtn.style.display = 'inline-block';
+                navCategoryName.textContent = selectedCategory?.name ?? '';
             }
         }
 
@@ -712,18 +609,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                 addProductToFacture(selectedProduct, qte);
             } else if (currentAction == 'edit') {
                 updateProductQuantity(currentRow, qte)
-            } else if (currentAction == 'barcode') {
-                addProductToFacture(selectedProduct, qte);
             }
 
             hideQuantityKeypad();
         })
-
-        addBtn.addEventListener('click', () => {
-            currentBarcode = '';
-            barcodeDisplay.textContent = '';
-            barcodeKeypadOverlay.classList.add('show');
-        });
 
         cancelBtn.addEventListener('click', hideQuantityKeypad);
 
@@ -753,73 +642,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
             });
         });
 
-        productCodeInput.addEventListener('click', () => {
-            currentBarcode = productCodeInput.value || '';
-            barcodeDisplay.textContent = currentBarcode;
-            barcodeKeypadOverlay.classList.add('show');
-        });
-
-        barcodeCancelBtn.addEventListener('click', () => {
-            barcodeKeypadOverlay.classList.remove('show');
-        });
-
-        barcodeKeypadOverlay.addEventListener('click', (e) => {
-            if (e.target === barcodeKeypadOverlay) {
-                barcodeKeypadOverlay.classList.remove('show');
-            }
-        });
-
-        document.querySelectorAll('.barcode-keypad-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                if (btn.dataset.number) {
-                    if (currentBarcode.length < 13) {
-                        currentBarcode += btn.dataset.number;
-                    }
-                    barcodeDisplay.textContent = currentBarcode;
-                } else if (btn.dataset.action === 'clear') {
-                    if (currentBarcode.length > 0) {
-                        currentBarcode = currentBarcode.slice(0, -1);
-                        barcodeDisplay.textContent = currentBarcode;
-                    }
-                }
-            });
-        });
-
-        barcodeConfirmBtn.addEventListener('click', () => {
-            if (!currentBarcode) {
-                alert("Veuillez entrer un code produit");
-                return;
-            }
-
-            productCodeInput.value = currentBarcode;
-            barcodeKeypadOverlay.classList.remove('show');
-
-            $.ajax({
-                method: "POST",
-                url: "./AJAX/product_code_ajax.php",
-                dataType: "json",
-                data: {
-                    barcode: currentBarcode
-                },
-                success: function(product) {
-                    if (product && product.id) {
-                        product.id = Number(product.id);
-                        product.selling_price = Number(product.selling_price);
-                        product.stock_quantity = Number(product.stock_quantity);
-                        selectedProduct = product;
-                        showQuantityKeypad('1', 'barcode');
-                    } else {
-                        alert("Produit introuvable avec ce code");
-                    }
-                },
-                error: function(xhr, status, error) {
-                    console.error("Erreur AJAX:", error);
-                    alert("Erreur lors de la recherche du produit");
-                }
-            });
-        });
-
-
         // Selection for a product in facture (one click)
         factureTbody.addEventListener('click', (e) => {
             const row = e.target.closest('tr');
@@ -837,17 +659,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
             }
         });
 
-
-        editBtn.addEventListener('click', () => {
-            const selectedRow = factureTbody.querySelector('tr.selected');
-            if (!selectedRow) {
-                alert("❗ Veuillez sélectionner une ligne à modifier");
-                return;
-            }
-
-            const currentQty = selectedRow.children[3].textContent;
-            showQuantityKeypad(currentQty, 'edit', selectedRow);
-        });
 
         deleteBtn.addEventListener('click', () => {
             const selectedRow = factureTbody.querySelector('tr.selected');
@@ -883,16 +694,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
 
 
         navHome.addEventListener('click', showCategories);
-        navCategory.addEventListener('click', () => {
-            if (selectedCategory) showBrands(selectedCategory.id);
-        });
-        backBtn.addEventListener('click', () => {
-            if (currentView === 'brands') {
-                showCategories();
-            } else if (currentView === 'products') {
-                showBrands(selectedCategory.id);
-            }
-        });
+        navCategory.addEventListener('click', showCategories);
+        navBackCategories.addEventListener('click', showCategories);
 
 
 
@@ -961,6 +764,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                 }));
                 const paymentMethod = document.querySelector('input[name="payment-method"]:checked')?.value;
                 finishSaleBtnEl.disabled = true;
+                const ticketWindow = window.open('about:blank', '_blank');
 
                 try {
                     const response = await fetch('caisse.php', {
@@ -973,19 +777,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && str_contains($_SERVER['CONTENT_TYPE
                         throw new Error(result.message || 'La vente n’a pas pu être enregistrée.');
                     }
 
-                    invoiceNumber.textContent = `TCK-${String(result.sale_id).padStart(4, '0')}`;
-                    if (autoPrint) {
-                        const popup = window.open('', '_blank', 'width=800,height=600');
-                        popup.document.write(`<html><head><title>${invoiceNumber.textContent}</title></head><body>${invoiceModal.querySelector('.modal-content').outerHTML}</body></html>`);
-                        popup.document.close();
-                        popup.print();
-                    }
+                    const ticketUrl = `ticket.php?id=${encodeURIComponent(result.sale_id)}${autoPrint ? '&print=1' : ''}`;
+                    if (ticketWindow) ticketWindow.location.href = ticketUrl;
                     factureTbody.innerHTML = '';
                     totalGlobal = 0;
                     updateTotalDisplay();
                     closeInvoiceModal();
-                    alert("Vente terminée avec succès !");
+                    if (!ticketWindow) window.location.href = ticketUrl;
                 } catch (error) {
+                    if (ticketWindow) ticketWindow.close();
                     alert(error.message);
                 } finally {
                     finishSaleBtnEl.disabled = false;

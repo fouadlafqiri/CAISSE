@@ -1,15 +1,22 @@
-<?php 
+<?php
+require_once __DIR__ . '/../auth.php';
+require_login(['admin', 'server']);
 require '../db_connection.php';
 
-if(isset($_POST['brand_id'])) {
-    $brandId = $_POST['brand_id'];
-    
-    $sql = "SELECT * FROM products WHERE brand_id = :brand_id";
+if (isset($_POST['category_id'])) {
+    $categoryId = (int)$_POST['category_id'];
+    $sql = "SELECT id, name, image, selling_price FROM products WHERE category_id = :category_id AND is_active = 1 ORDER BY CASE WHEN LOWER(name) IN ('espresso', 'expresso') THEN 0 ELSE 1 END, name";
     $req = $pdo->prepare($sql);
-    $req->execute([':brand_id' => $brandId]);
+    $req->execute([':category_id' => $categoryId]);
     $products = $req->fetchAll(PDO::FETCH_ASSOC);
-    
-    echo json_encode($products);
+    foreach ($products as &$product) {
+        $product['image'] = catalog_product_image($product['name'], $product['image']);
+    }
+    unset($product);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($products, JSON_UNESCAPED_UNICODE);
 } else {
-    echo json_encode([]);
+    http_response_code(400);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['error' => 'Catégorie manquante.']);
 }

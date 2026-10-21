@@ -1,5 +1,6 @@
 <?php 
-session_start(); 
+require_once __DIR__ . '/auth.php';
+require_login(['admin']);
 require_once('db_connection.php');
 if(isset($_POST['add'])){
     if((isset($_POST['name']) && isset($_POST['brand-category']) && (isset($_FILES['image']) && $_FILES['image']['error'] == 0)
@@ -92,9 +93,10 @@ if(isset($_POST['delete'])){
 
 </head>
 <body>
+    <?php render_app_date_script($pdo); ?>
     <header class="header">
         <div class="header-left">
-            <span><i class="fas fa-user"></i> User : <?php echo strtoupper($_SESSION['username'] ?? 'ADMIN'); ?></span>
+            <span><i class="fas fa-user"></i> Administrateur : <?php echo strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN')); ?></span>
         </div>
         <div class="header-center">
             <span id="current-time"></span>

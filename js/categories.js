@@ -11,12 +11,12 @@ editBtn.forEach(btn => {
         let tr = btn.closest('.category');
         let id =  tr.children[0].textContent.trim();
         let name = tr.children[1].textContent.trim();
-        let image = tr.children[2].querySelector('.category-image').getAttribute('src');
+        let image = tr.children[2].querySelector('.category-image')?.getAttribute('src') || '';
 
         categoryId.value = id;
         categoryName.value = name;
 
-        document.getElementById('imagePreview').innerHTML = `<img src="${image}" style="width:140px;border-radius:10px;">`;
+        document.getElementById('imagePreview').innerHTML = image ? `<img src="${image}" style="width:140px;border-radius:10px;">` : '<div class="placeholder"><i class="fas fa-image"></i><p>Aucune image</p></div>';
 
         document.querySelectorAll('.category').forEach(row => row.classList.remove('selected'));
         tr.classList.add('selected');
@@ -36,8 +36,6 @@ editBtn.forEach(btn => {
         let tr = btn.closest('.category');
         let id =  tr.children[0].textContent.trim();
         let name = tr.children[1].textContent.trim();
-        let image = tr.children[2].querySelector('.category-image').getAttribute('src');
-
         categoryId.value = '';
         categoryName.value = '';
 

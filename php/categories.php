@@ -1,78 +1,78 @@
 <?php 
-session_start(); 
+require_once __DIR__ . '/auth.php';
+require_login(['admin']);
 require_once('db_connection.php');
 
-if(isset($_POST['add'])){
-    if((isset($_POST['name']) && (isset($_FILES['image']) && $_FILES['image']['error'] == 0)
-    )
-      ){
-        $name = strip_tags($_POST['name']);
-        $ext = pathinfo($_FILES['image']['name'],PATHINFO_EXTENSION);
-        $image_name = str_replace(' ','_',$name).".".$ext;
-        $image_path = "../imgs/categories-img/".$image_name;
-
-        if(move_uploaded_file($_FILES['image']['tmp_name'],$image_path)){
-            $sql = "INSERT INTO categories (name,image) VALUES (:name,:image)";
-            $req = $pdo->prepare($sql);
-            $req->bindValue(':name',$name,PDO::PARAM_STR);
-            $req->bindValue(':image',$image_path,PDO::PARAM_STR);
-            $req->execute();
-            header('location:categories.php');
-            exit();
-        }else{
-            header('location:categories.php');
-            exit();
-        }
-    }else{
-        header('location:categories.php');
-        exit();
-    }
-}
-
-if(isset($_POST['update'])){
-    if(isset($_POST['name']))
-    {
-        $id = (int)$_POST['id'];
-        $name = strip_tags($_POST['name']);
-        
-        $sql = "SELECT * FROM categories WHERE id=:id";
-        $req = $pdo->prepare($sql);
-        $req->bindValue(':id',$id,PDO::PARAM_INT);
-        $req->execute();
-
-        $category = $req->fetch(PDO::FETCH_ASSOC);
-        
-        if($category){
-            $image_path = $category['image'];
-
-            if(isset($_FILES['image']) && $_FILES['image']['error'] === 0){
-                $ext = pathinfo($_FILES['image']['name'],PATHINFO_EXTENSION);
-                $image_name = str_replace(' ','_',$name).".".$ext;
-                $image_path = "../imgs/categories-img/".$image_name;
-                move_uploaded_file($_FILES['image']['tmp_name'],$image_path);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    try {
+        $name = trim($_POST['name'] ?? '');
+        if (isset($_POST['add']) || isset($_POST['update'])) {
+            if ($name === '') {
+                throw new RuntimeException('Le nom de la catégorie est obligatoire.');
             }
-            
-            $sql2 = "UPDATE categories SET name=:name,image=:image WHERE id=:id";
-            $req2 = $pdo->prepare($sql2);
-            $req2->bindValue(':id',$id,PDO::PARAM_INT);
-            $req2->bindValue(':name',$name,PDO::PARAM_STR);
-            $req2->bindValue(':image',$image_path,PDO::PARAM_STR);
-            $req2->execute();
-            header('location:categories.php');
-            exit();
+            $id = (int)($_POST['id'] ?? 0);
+            $duplicateStmt = $pdo->prepare('SELECT id FROM categories WHERE name = :name AND id <> :id LIMIT 1');
+            $duplicateStmt->execute([':name' => $name, ':id' => isset($_POST['update']) ? $id : 0]);
+            if ($duplicateStmt->fetchColumn()) {
+                throw new RuntimeException('Une catégorie porte déjà ce nom.');
+            }
+            $image = null;
+            if (isset($_POST['update'])) {
+                $stmt = $pdo->prepare('SELECT image FROM categories WHERE id = :id');
+                $stmt->execute([':id' => $id]);
+                $image = $stmt->fetchColumn();
+                if ($image === false) {
+                    throw new RuntimeException('Catégorie introuvable.');
+                }
+            }
+            if (isset($_FILES['image']) && $_FILES['image']['error'] !== UPLOAD_ERR_NO_FILE) {
+                if ($_FILES['image']['error'] !== UPLOAD_ERR_OK) {
+                    throw new RuntimeException('Le téléversement de l’image a échoué.');
+                }
+                $extension = strtolower(pathinfo($_FILES['image']['name'], PATHINFO_EXTENSION));
+                if (!in_array($extension, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+                    throw new RuntimeException('Format d’image invalide (JPG, PNG ou WEBP).');
+                }
+                $fileName = bin2hex(random_bytes(12)) . '.' . $extension;
+                $image = '../imgs/categories-img/' . $fileName;
+                if (!move_uploaded_file($_FILES['image']['tmp_name'], __DIR__ . '/../imgs/categories-img/' . $fileName)) {
+                    throw new RuntimeException('Impossible d’enregistrer l’image de la catégorie.');
+                }
+            }
+            if (isset($_POST['add'])) {
+                $stmt = $pdo->prepare('INSERT INTO categories (name, image) VALUES (:name, :image)');
+            } else {
+                $stmt = $pdo->prepare('UPDATE categories SET name = :name, image = :image WHERE id = :id');
+                $stmt->bindValue(':id', $id, PDO::PARAM_INT);
+            }
+            $stmt->bindValue(':name', $name, PDO::PARAM_STR);
+            $stmt->bindValue(':image', $image, $image === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+            $stmt->execute();
+            $_SESSION['category_message'] = 'Catégorie enregistrée.';
+        } elseif (isset($_POST['delete'])) {
+            $id = (int)($_POST['id'] ?? 0);
+            $stmt = $pdo->prepare('SELECT COUNT(*) FROM products WHERE category_id = :id');
+            $stmt->execute([':id' => $id]);
+            if ((int)$stmt->fetchColumn() > 0) {
+                throw new RuntimeException('Cette catégorie contient encore des produits. Réaffectez-les ou retirez-les avant de la supprimer.');
+            }
+            $stmt = $pdo->prepare('SELECT COUNT(*) FROM brands WHERE category_id = :id');
+            $stmt->execute([':id' => $id]);
+            if ((int)$stmt->fetchColumn() > 0) {
+                throw new RuntimeException('Cette catégorie est encore liée aux anciennes données. Elle ne peut pas être supprimée.');
+            }
+            $stmt = $pdo->prepare('DELETE FROM categories WHERE id = :id');
+            $stmt->execute([':id' => $id]);
+            $_SESSION['category_message'] = 'Catégorie supprimée.';
         }
+    } catch (Throwable $e) {
+        $_SESSION['category_message'] = 'Opération impossible : ' . $e->getMessage();
     }
-}
-
-if(isset($_POST['delete'])){
-    $id = (int)$_POST['id'];
-    $sql = 'DELETE FROM categories WHERE id=:id';
-    $req = $pdo->prepare($sql);
-    $req-> bindValue(':id',$id,PDO::PARAM_INT);
-    $req->execute();
-    header('Location:categories.php');
+    header('Location: categories.php');
     exit();
 }
+$message = $_SESSION['category_message'] ?? '';
+unset($_SESSION['category_message']);
 ?>
 
 <!DOCTYPE html>
@@ -88,7 +88,7 @@ if(isset($_POST['delete'])){
 <body>
     <header class="header">
         <div class="header-left">
-            <span><i class="fas fa-user"></i> User : <?php echo strtoupper($_SESSION['username'] ?? 'ADMIN'); ?></span>
+            <span><i class="fas fa-user"></i> Administrateur : <?php echo strtoupper(htmlspecialchars($_SESSION['username'] ?? 'ADMIN')); ?></span>
         </div>
         <div class="header-center">
             <span id="current-time"></span>
@@ -112,6 +112,7 @@ if(isset($_POST['delete'])){
                     <i class="fas fa-plus-circle"></i>
                     <span>Ajouter / Modifier Catégorie</span>
                 </div>
+                <?php if ($message): ?><div class="alert alert-info"><?=htmlspecialchars($message)?></div><?php endif; ?>
 
                 <form method="POST" enctype="multipart/form-data" >
                     <input type="hidden" name="id" id="category-id">
@@ -130,7 +131,7 @@ if(isset($_POST['delete'])){
                     </div>
                     <div class="form-group">
                         <label for="category-image">
-                            <i class="fas fa-image"></i> Image de la Marque
+                            <i class="fas fa-image"></i> Image (facultative)
                         </label>
                         <input 
                             type="file" 
@@ -185,7 +186,7 @@ if(isset($_POST['delete'])){
                         </thead>
 
                         <?php
-                        $sql2 = "SELECT * FROM categories ORDER BY id ASC";
+                        $sql2 = 'SELECT c.* FROM categories c ORDER BY c.name';
                         $stmt = $pdo->prepare($sql2);
                         $stmt->execute();
                         $categories = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -195,9 +196,9 @@ if(isset($_POST['delete'])){
                             <?php foreach($categories as $category):?>
                                 <tr class="category">
                                     <td><?=$category['id']?></td>
-                                    <td><?=$category['name']?></td>
+                                    <td><?=htmlspecialchars($category['name'])?></td>
                                     <td>
-                                        <img src="<?=$category['image']?>" alt="<?=$category['name']?>" style="width:140px;" class="category-image" >
+                                        <?php if ($category['image']): ?><img src="<?=htmlspecialchars($category['image'])?>" alt="<?=htmlspecialchars($category['name'])?>" style="width:140px;" class="category-image"><?php else: ?><span>—</span><?php endif; ?>
                                     </td>
                                     <td>
                                         <button class="action-btn btn-edit" >
@@ -221,6 +222,7 @@ if(isset($_POST['delete'])){
     </div>
                                 
     <script src="../js/categories.js"></script>
+    <?php render_app_date_script($pdo); ?>
     <script src="../js/global-time.js"></script>
-</body> 
+</body>
 </html>

@@ -92,6 +92,11 @@
     box-shadow: 0 0 0 0.2rem rgba(40, 167, 69, 0.25);
 }
 
+#product-active {
+    width: auto;
+    margin-right: 8px;
+}
+
 .form-group select {
     cursor: pointer;
     background: white;

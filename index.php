@@ -1,5 +1,5 @@
-<?php 
-session_start(); 
+<?php
+require_once __DIR__ . '/php/session_bootstrap.php';
 include('php/db_connection.php'); 
 ?>
 <!DOCTYPE html>
@@ -8,6 +8,9 @@ include('php/db_connection.php');
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>LOGIN</title>
+    <meta name="theme-color" content="#28a745">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="apple-touch-icon" href="imgs/store-logo.png">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         :root {
@@ -463,7 +466,6 @@ include('php/db_connection.php');
                         <i class="fas fa-sign-in-alt"></i>
                         login
                     </button>
-                    
                     <?php 
                     if (isset($_SESSION['error_message'])){ 
                         echo '<div class="error-message">
@@ -511,9 +513,13 @@ include('php/db_connection.php');
           document.getElementById('password').value = '•'.repeat(currentPassword.length);
         }
 
-        function addDigit(digit) {
-          currentPassword += digit;
+        function addCharacter(character) {
+          currentPassword += character;
           updateDisplay();
+        }
+
+        function addDigit(digit) {
+          addCharacter(digit);
         }
 
         function backspace() {
@@ -549,9 +555,9 @@ include('php/db_connection.php');
         document.addEventListener('keydown', e => {
           if (document.activeElement.tagName === 'SELECT') return;
 
-          if (e.key >= '0' && e.key <= '9') {
+          if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault();
-            addDigit(e.key);
+            addCharacter(e.key);
           } else if (e.key === 'Backspace') {
             e.preventDefault();
             backspace();
@@ -573,5 +579,6 @@ include('php/db_connection.php');
 
         clearPassword(); // Initialize display
     </script>
+    <script src="js/pwa.js"></script>
 </body>
 </html>
